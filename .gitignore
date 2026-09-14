@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.faiss
+node_modules/
+.venv/
+*.pyc
