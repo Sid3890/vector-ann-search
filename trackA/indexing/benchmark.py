@@ -3,23 +3,8 @@ GeekyClouds — ANN Benchmarking Core
 indexing/benchmark.py
 
 Reusable benchmarking harness shared by every index type in this project
-(FLAT, IVF, HNSW, PQ, MANAGED). Computes:
-
-  - recall@10           (retrieved ids vs. exact FlatL2 ground truth)
-  - p50 / p95 query latency (ms), measured per-query so percentiles are
-    accurate rather than averaged
-  - index build time (s)  — timed by the caller around index construction,
-    passed in here
-  - process memory footprint (MB) — via psutil, sampled after build/search
-
-Every run is appended as one row to results/benchmarks.csv, so later
-build/index scripts (IVF, HNSW, PQ, managed-service benchmarks) can all
-call `run_benchmark(...)` and land in the same comparison table used for
-the final report.
-
-Idempotent: safe to import/run repeatedly — the CSV header is written
-once, and each call only appends its own row (no overwrite, no dedup
-needed since every run is a legitimate new data point).
+(FLAT, IVF, HNSW, PQ, MANAGED). Computes recall, latency, build time,
+process memory, and optional serialized index-size/compression metrics.
 """
 
 from __future__ import annotations
@@ -27,17 +12,16 @@ from __future__ import annotations
 import csv
 import os
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
 import psutil
 
-from baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+try:
+    from .baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
+except ImportError:
+    from baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_CSV = RESULTS_DIR / "benchmarks.csv"
@@ -49,6 +33,9 @@ CSV_COLUMNS = [
     "p95_ms",
     "build_time_s",
     "memory_mb",
+    "raw_bytes",
+    "pq_bytes",
+    "compression_ratio",
 ]
 
 
@@ -60,11 +47,9 @@ class BenchmarkResult:
     p95_ms: float
     build_time_s: float
     memory_mb: float
-
-
-# ---------------------------------------------------------------------------
-# Metric helpers
-# ---------------------------------------------------------------------------
+    raw_bytes: int | None = None
+    pq_bytes: int | None = None
+    compression_ratio: float | None = None
 
 
 def get_memory_mb() -> float:
@@ -76,13 +61,7 @@ def get_memory_mb() -> float:
 def compute_recall_at_k(
     retrieved_ids: np.ndarray, ground_truth_ids: np.ndarray, k: int = 10
 ) -> float:
-    """Mean recall@k across all queries.
-
-    retrieved_ids / ground_truth_ids: (nq, >=k) int arrays of neighbor ids
-    from the index under test and the exact FlatL2 baseline, respectively.
-    For each query, recall = |retrieved_top_k ∩ true_top_k| / k, averaged
-    over queries.
-    """
+    """Mean recall@k across all queries."""
     if retrieved_ids.shape[0] != ground_truth_ids.shape[0]:
         raise ValueError("retrieved_ids and ground_truth_ids must have the same number of queries")
 
@@ -96,10 +75,7 @@ def compute_recall_at_k(
 
 
 def measure_query_latencies_ms(index, xq: np.ndarray, k: int = 10) -> np.ndarray:
-    """Per-query search latency in milliseconds (one search() call per query,
-    so p50/p95 reflect real per-request tail latency rather than a batched
-    average).
-    """
+    """Measure one search call per query and return per-query milliseconds."""
     if xq.dtype != np.float32:
         xq = xq.astype(np.float32)
 
@@ -112,11 +88,6 @@ def measure_query_latencies_ms(index, xq: np.ndarray, k: int = 10) -> np.ndarray
     return latencies_ms
 
 
-# ---------------------------------------------------------------------------
-# Harness
-# ---------------------------------------------------------------------------
-
-
 def run_benchmark(
     index_type: str,
     index,
@@ -125,28 +96,24 @@ def run_benchmark(
     build_time_s: float,
     k: int = 10,
     csv_path: str | Path = RESULTS_CSV,
+    raw_bytes: int | None = None,
+    pq_bytes: int | None = None,
 ) -> BenchmarkResult:
-    """Benchmark a built index and append the result row to the CSV.
+    """Benchmark an index and append one row to the results CSV.
 
-    Args:
-        index_type: label for results/benchmarks.csv, e.g. "FLAT", "IVF",
-            "HNSW", "PQ", "MANAGED".
-        index: any object exposing `.search(xq, k) -> (distances, ids)`
-            (every FAISS index type satisfies this).
-        xq: (nq, dim) float32 query vectors.
-        ground_truth_ids: (nq, >=k) exact neighbor ids from the FlatL2
-            baseline, used to score recall@10.
-        build_time_s: index construction time, timed by the caller around
-            the index-building step (kept outside this function since
-            build strategy differs per index type).
-        k: neighbors per query (recall@10 default per project spec).
-        csv_path: where to append the result row.
+    ``raw_bytes`` and ``pq_bytes`` are optional so existing IVF/HNSW/FLAT
+    callers remain compatible. When both are provided, the compression ratio
+    is calculated as ``raw_bytes / pq_bytes``.
     """
     _, retrieved_ids = search_flat(index, xq, k=k)
-
     latencies_ms = measure_query_latencies_ms(index, xq, k=k)
     recall = compute_recall_at_k(retrieved_ids, ground_truth_ids, k=k)
     memory_mb = get_memory_mb()
+    compression_ratio = (
+        raw_bytes / pq_bytes
+        if raw_bytes is not None and pq_bytes is not None and pq_bytes > 0
+        else None
+    )
 
     result = BenchmarkResult(
         index_type=index_type,
@@ -155,46 +122,58 @@ def run_benchmark(
         p95_ms=round(float(np.percentile(latencies_ms, 95)), 4),
         build_time_s=round(build_time_s, 4),
         memory_mb=round(memory_mb, 2),
+        raw_bytes=raw_bytes,
+        pq_bytes=pq_bytes,
+        compression_ratio=(round(compression_ratio, 4) if compression_ratio is not None else None),
     )
     append_result_csv(result, csv_path=csv_path)
     return result
 
 
 def append_result_csv(result: BenchmarkResult, csv_path: str | Path = RESULTS_CSV) -> None:
-    """Append one benchmark row to the CSV, writing the header if the file
-    doesn't exist yet. Idempotent across repeated runs — each call only
-    adds its own row.
-    """
+    """Append a result, migrating the legacy six-column CSV if necessary."""
     csv_path = Path(csv_path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = csv_path.exists() and csv_path.stat().st_size > 0
+    result_row = asdict(result)
 
-    with open(csv_path, mode="a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        if not file_exists:
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             writer.writeheader()
-        writer.writerow(asdict(result))
+            writer.writerow(result_row)
+        return
 
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        existing_rows = list(reader)
+        existing_columns = reader.fieldnames or []
 
-# ---------------------------------------------------------------------------
-# Manual smoke test — run `python indexing/benchmark.py`
-# Benchmarks the FLAT baseline against itself (recall@10 should be 1.0),
-# proving the harness end-to-end before IVF/HNSW/PQ scripts plug into it.
-# ---------------------------------------------------------------------------
+    # Day 2/3 produced a six-column file. Rewrite it once so new PQ rows do
+    # not create malformed rows with more values than the old header allows.
+    if existing_columns != CSV_COLUMNS:
+        temp_path = csv_path.with_suffix(csv_path.suffix + ".tmp")
+        with temp_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            for row in existing_rows:
+                writer.writerow({column: row.get(column, "") for column in CSV_COLUMNS})
+            writer.writerow(result_row)
+        os.replace(temp_path, csv_path)
+        return
+
+    with csv_path.open("a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerow(result_row)
+
 
 if __name__ == "__main__":
     print("Loading dataset ...")
     ds = load_dataset(seed=DEFAULT_SEED)
-
     print("Building FlatL2 ground-truth index ...")
     t0 = time.perf_counter()
     flat_index = build_flat_index(ds.xb)
     build_time = time.perf_counter() - t0
-
-    print("Computing ground truth (FlatL2 self-search) ...")
+    print("Computing exact ground truth ...")
     _, ground_truth_ids = search_flat(flat_index, ds.xq, k=10)
-
-    print("Running benchmark harness on FLAT index ...")
     result = run_benchmark(
         index_type="FLAT",
         index=flat_index,
