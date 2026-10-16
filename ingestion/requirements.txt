@@ -1,0 +1,5 @@
+boto3
+botocore[crt]
+SQLAlchemy
+psycopg2-binary
+httpx
