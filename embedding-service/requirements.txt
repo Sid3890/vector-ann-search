@@ -2,3 +2,5 @@ fastapi
 uvicorn
 sentence-transformers
 python-multipart
+boto3
+botocore[crt]
