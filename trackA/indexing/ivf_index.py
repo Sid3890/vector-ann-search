@@ -8,10 +8,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 try:
-    from .baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
+    from .baseline import DEFAULT_SEED, Dataset, add_dataset_args, build_flat_index, dataset_from_args, load_dataset, search_flat
     from .benchmark import RESULTS_CSV, BenchmarkResult, run_benchmark
 except ImportError:
-    from baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
+    from baseline import DEFAULT_SEED, Dataset, add_dataset_args, build_flat_index, dataset_from_args, load_dataset, search_flat
     from benchmark import RESULTS_CSV, BenchmarkResult, run_benchmark
 
 
@@ -145,14 +145,16 @@ def run_ivf_sweep(
     k: int = DEFAULT_K,
     csv_path: str | Path = RESULTS_CSV,
     plot_path: str | Path = PLOT_PATH,
+    dataset: Dataset | None = None,
 ) -> list[BenchmarkResult]:
 
-    dataset = load_dataset(
-        num_vectors=num_vectors,
-        dim=dim,
-        num_queries=num_queries,
-        seed=seed,
-    )
+    if dataset is None:
+        dataset = load_dataset(
+            num_vectors=num_vectors,
+            dim=dim,
+            num_queries=num_queries,
+            seed=seed,
+        )
 
     print(
         f"Dataset: "
@@ -238,4 +240,13 @@ def run_ivf_sweep(
 
 
 if __name__ == "__main__":
-    run_ivf_sweep()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="IVF nprobe sweep")
+    add_dataset_args(parser)
+    parser.add_argument("--csv", default=str(RESULTS_CSV))
+    cli = parser.parse_args()
+    run_ivf_sweep(
+        csv_path=cli.csv,
+        dataset=dataset_from_args(cli),
+    )

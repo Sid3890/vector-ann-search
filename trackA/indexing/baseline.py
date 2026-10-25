@@ -18,6 +18,7 @@ Swap-in points for real datasets (see `load_dataset` docstring):
 
 from __future__ import annotations
 
+import argparse
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,75 @@ def load_dataset(
     xb = rng.random((num_vectors, dim), dtype=np.float32)
     xq = rng.random((num_queries, dim), dtype=np.float32)
     return Dataset(xb=xb, xq=xq, dim=dim)
+
+
+def _load_float32_matrix(path: str | Path, label: str) -> np.ndarray:
+    arr = np.load(path)
+    if arr.ndim != 2:
+        raise ValueError(f"{label} file {path} must be 2D (n, dim), got {arr.shape}")
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{label} file {path} contains NaN/inf values")
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def load_npy_dataset(
+    base_path: str | Path,
+    query_path: str | Path | None = None,
+    num_queries: int = DEFAULT_NUM_QUERIES,
+    seed: int = DEFAULT_SEED,
+) -> Dataset:
+    """Load real embeddings from .npy files.
+
+    If query_path is omitted, `num_queries` random rows are HELD OUT of the
+    base set and used as queries (so a query is never its own neighbour).
+    The same seed gives the same split, so FLAT / IVF / HNSW runs that use
+    the same arguments see identical data.
+    """
+    xb = _load_float32_matrix(base_path, "base")
+
+    if query_path is not None:
+        xq = _load_float32_matrix(query_path, "query")
+        if xq.shape[1] != xb.shape[1]:
+            raise ValueError(
+                f"query dim {xq.shape[1]} != base dim {xb.shape[1]}"
+            )
+    else:
+        if not 0 < num_queries < xb.shape[0]:
+            raise ValueError("num_queries must be between 1 and len(base) - 1")
+        rng = np.random.default_rng(seed)
+        held_out = rng.choice(xb.shape[0], size=num_queries, replace=False)
+        keep = np.ones(xb.shape[0], dtype=bool)
+        keep[held_out] = False
+        xq = xb[held_out]
+        xb = xb[keep]
+
+    return Dataset(
+        xb=np.ascontiguousarray(xb),
+        xq=np.ascontiguousarray(xq),
+        dim=xb.shape[1],
+    )
+
+
+def add_dataset_args(parser: argparse.ArgumentParser) -> None:
+    """Shared CLI flags so every benchmark script loads data identically."""
+    parser.add_argument("--base", help=".npy float32 embeddings, shape (n, dim). "
+                        "Omit to use the synthetic dataset.")
+    parser.add_argument("--queries", help=".npy query vectors; if omitted, "
+                        "--num-queries rows are held out of --base")
+    parser.add_argument("--num-queries", type=int, default=DEFAULT_NUM_QUERIES)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+
+
+def dataset_from_args(args: argparse.Namespace) -> Dataset:
+    if args.base:
+        print(f"Dataset source: {args.base}")
+        return load_npy_dataset(
+            args.base, args.queries, num_queries=args.num_queries, seed=args.seed
+        )
+    if args.queries:
+        raise ValueError("--queries requires --base")
+    print("Dataset source: SYNTHETIC uniform random (not representative)")
+    return load_dataset(num_queries=args.num_queries, seed=args.seed)
 
 
 def load_fvecs(path: str | Path) -> np.ndarray:

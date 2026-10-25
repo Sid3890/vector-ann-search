@@ -40,11 +40,10 @@ def load_configs(csv_path: Path) -> dict[str, Config]:
 
         for row in reader:
             try:
-                runs[row["index_type"]].append(
-                    {m: float(row[m]) for m in METRICS}
-                )
+                metrics = {m: float(row[m]) for m in METRICS}
             except (TypeError, ValueError):
                 continue  # skip malformed rows rather than abort the report
+            runs[row["index_type"]].append(metrics)
 
     return {
         name: {m: statistics.median(r[m] for r in rows) for m in METRICS}
