@@ -1,0 +1,6 @@
+mode,index_type,recall_at_10,p50_ms,p95_ms,build_time_s,memory_mb,cost_per_query_usd,qps,notes
+local,FLAT,0.9998,0.1828,0.205325,0.0028436,9.21604,2.6847e-09,5366.83,priced as 1 Fargate task 1.0vCPU/2.0GB; mem=serialized index size; single thread
+local,IVF,0.9636,0.0517,0.060105,0.0411964,9.41854,7.61746e-10,18914.9,priced as 1 Fargate task 1.0vCPU/2.0GB; mem=serialized index size; single thread
+local,HNSW,0.9908,0.0726,0.085155,0.416875,10.8459,1.09655e-09,13139.7,priced as 1 Fargate task 1.0vCPU/2.0GB; mem=serialized index size; single thread
+local,PQ,0.2224,0.0397,0.04251,1.26351,0.691796,5.80953e-10,24801.2,priced as 1 Fargate task 1.0vCPU/2.0GB; mem=serialized index size; single thread
+distributed,HNSW,0.994,19.8123,32.8885,0.389054,10.8454,2.50206e-06,28.567,"4 shards x 1 replica(s) on Fargate + router + ALB; mem=sum shard files x replicas; build=proxy rebuild, sequential; qps measured from client at concurrency=4; ALB hourly only (no LCU/data transfer)"
