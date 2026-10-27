@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import psutil
 
-from baseline import DEFAULT_SEED, build_flat_index, load_dataset, search_flat
+from baseline import add_dataset_args, build_flat_index, dataset_from_args, search_flat
 
 # ---------------------------------------------------------------------------
 # Config
@@ -183,8 +183,15 @@ def append_result_csv(result: BenchmarkResult, csv_path: str | Path = RESULTS_CS
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FLAT baseline benchmark")
+    add_dataset_args(parser)
+    parser.add_argument("--csv", default=str(RESULTS_CSV))
+    cli = parser.parse_args()
+
     print("Loading dataset ...")
-    ds = load_dataset(seed=DEFAULT_SEED)
+    ds = dataset_from_args(cli)
 
     print("Building FlatL2 ground-truth index ...")
     t0 = time.perf_counter()
@@ -202,6 +209,7 @@ if __name__ == "__main__":
         ground_truth_ids=ground_truth_ids,
         build_time_s=build_time,
         k=10,
+        csv_path=cli.csv,
     )
     print(result)
-    print(f"Appended to {RESULTS_CSV}")
+    print(f"Appended to {cli.csv}")
